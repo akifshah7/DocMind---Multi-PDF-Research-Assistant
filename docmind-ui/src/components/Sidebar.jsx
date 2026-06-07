@@ -35,7 +35,7 @@ export default function Sidebar({
     files.forEach((file) => formData.append("files", file));
 
     try {
-      const res = await axios.post("http://127.0.0.1:8000/ingest", formData);
+      const res = await axios.post(`${import.meta.env.VITE_API_URL}/ingest`, formData);
       setIngestedFiles((prev) => [...prev, ...res.data.files]);
       setFiles([]);
     } catch (err) {
