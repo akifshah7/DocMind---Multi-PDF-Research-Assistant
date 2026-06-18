@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict
 from typing import List, TypedDict
 from dotenv import load_dotenv
 
@@ -89,6 +90,22 @@ def ingest_pdfs(pdf_paths: List[str]) -> int:
     return len(all_chunks)
 
 
+# ── Vague question detection ──────────────────────────────────────────────────
+
+VAGUE_PATTERNS = [
+    "just uploaded", "last uploaded", "recently uploaded",
+    "what did i upload", "what is the pdf", "what are my",
+    "summarize all", "all documents", "all pdfs", "both pdf",
+    "i uploaded", "uploaded about", "new pdf", "latest pdf",
+    "what pdf", "give me a summary", "summarize the pdf",
+]
+
+
+def is_vague_question(question: str) -> bool:
+    q = question.lower()
+    return any(pattern in q for pattern in VAGUE_PATTERNS)
+
+
 # ── Graph state ───────────────────────────────────────────────────────────────
 
 
@@ -116,6 +133,36 @@ def retrieve(state: GraphState) -> GraphState:
             for doc in docs
         ],
     }
+
+
+def retrieve_all(state: GraphState) -> GraphState:
+    """Retrieve chunks from every ingested document (used for vague/meta questions)."""
+    vectorstore = get_vectorstore()
+    result = vectorstore.get(include=["documents", "metadatas"])
+
+    by_source = defaultdict(list)
+    for doc, meta in zip(result["documents"], result["metadatas"]):
+        source = meta.get("source", "Unknown")
+        by_source[source].append((doc, meta))
+
+    docs = []
+    sources = []
+    for source, chunks in by_source.items():
+        # Take up to 4 chunks per document to keep context manageable
+        for doc, meta in chunks[:4]:
+            docs.append(doc)
+            sources.append(
+                f"{source} — page {meta.get('page', 0) + 1}"
+            )
+
+    return {**state, "documents": docs, "sources": sources}
+
+
+def route_question(state: GraphState) -> str:
+    """Route to retrieve_all for vague questions, normal retrieve otherwise."""
+    if is_vague_question(state["question"]):
+        return "retrieve_all"
+    return "retrieve"
 
 
 def grade_documents(state: GraphState) -> GraphState:
@@ -214,12 +261,22 @@ def build_graph():
     graph = StateGraph(GraphState)
 
     graph.add_node("retrieve", retrieve)
+    graph.add_node("retrieve_all", retrieve_all)
     graph.add_node("grade_documents", grade_documents)
     graph.add_node("generate", generate)
     graph.add_node("rephrase_query", rephrase_query)
     graph.add_node("no_docs_answer", no_docs_answer)
 
-    graph.set_entry_point("retrieve")
+    # Route vague questions to retrieve_all, specific questions to retrieve
+    graph.set_conditional_entry_point(
+        route_question,
+        {
+            "retrieve_all": "retrieve_all",
+            "retrieve": "retrieve",
+        },
+    )
+    # retrieve_all skips grading — we trust it has relevant content
+    graph.add_edge("retrieve_all", "generate")
     graph.add_edge("retrieve", "grade_documents")
     graph.add_conditional_edges(
         "grade_documents",
